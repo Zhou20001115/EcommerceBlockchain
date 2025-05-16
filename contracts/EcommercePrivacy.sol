@@ -1,61 +1,68 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.0;
 
-// 导入OpenZeppelin权限管理合约
-import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/access/AccessControl.sol";
+import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+import "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
 
-contract EcommercePrivacy is Ownable, AccessControl {
-    // 角色权限定义
-    bytes32 public constant SELLER_ROLE = keccak256("SELLER");  // 卖家角色哈希
-    bytes32 public constant BUYER_ROLE = keccak256("BUYER");   // 买家角色哈希
+contract EcommercePrivacy is AccessControl, EIP712 {
+    using ECDSA for bytes32;
 
-    // 商品数据结构（包含加密元数据）
+    // 角色定义
+    bytes32 public constant SELLER_ROLE = keccak256("SELLER");
+    bytes32 public constant BUYER_ROLE = keccak256("BUYER");
+
+    // EIP-712 类型哈希
+    bytes32 private constant PLACE_ORDER_TYPEHASH =
+        keccak256(
+            "PlaceOrder(uint256 productId,bytes32 dataHash,uint256 timestamp,uint256 nonce)"
+        );
+
+    // 数据结构
     struct Product {
-        uint256 id;                // 商品唯一标识
-        string name;               // 商品名称（明文）
-        uint256 price;             // 商品价格
-        address seller;            // 卖家地址
-        string encryptedDetails;  // 加密的商品详情
-        string iv;                 // 加密初始向量（用于AES等算法解密）
+        uint256 id;
+        string name;
+        uint256 price;
+        address seller;
+        string encryptedDetails;
+        string iv;
+        bytes encryptedKey;
     }
 
-    // 订单数据结构（包含加密交易数据）
     struct Order {
-        uint256 id;               // 订单唯一标识
-        uint256 productId;        // 关联商品ID
-        address buyer;            // 买家地址
-        uint256 timestamp;        // 下单时间戳
-        bool fulfilled;           // 订单完成状态
-        string encryptedData;     // 加密的订单数据
-        string iv;                // 加密初始向量
+        uint256 id;
+        uint256 productId;
+        address buyer;
+        uint256 timestamp;
+        bool fulfilled;
+        string encryptedData;
+        string iv;
+        bytes32 dataHash;
+        bytes encryptedKey;
     }
 
     // 状态变量
-    uint256 private productCounter;  // 商品ID自增计数器
-    uint256 private orderCounter;    // 订单ID自增计数器
-    mapping(uint256 => Product) public products;  // 商品ID到数据的映射
-    mapping(uint256 => Order) public orders;      // 订单ID到数据的映射
+    uint256 private productCounter;
+    uint256 private orderCounter;
+    mapping(uint256 => Product) public products;
+    mapping(uint256 => Order) public orders;
+    mapping(address => uint256) public nonces;
 
-    // 事件定义
-    event ProductAdded(uint256 productId, address seller, string iv); // 商品添加事件
-    event OrderPlaced(uint256 orderId, address buyer, string iv);      // 订单创建事件
+    // 事件
+    event ProductAdded(uint256 productId, address seller);
+    event OrderPlaced(uint256 orderId, address buyer, bytes32 dataHash);
 
-    // 构造函数（初始化角色权限）
-    constructor() Ownable(msg.sender) {
-        // 部署者获得默认管理员权限
+    constructor() EIP712("EcommercePrivacy", "1") {
         _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
-        // 部署者同时拥有卖家和买家角色（示例配置）
         _grantRole(SELLER_ROLE, msg.sender);
-        _grantRole(BUYER_ROLE, msg.sender);
     }
 
-    // 商品添加函数（仅限卖家）
     function addProduct(
         string memory name,
         uint256 price,
         string memory encryptedDetails,
-        string memory iv  // 加密初始向量参数
+        string memory iv,
+        bytes memory encryptedKey
     ) external onlyRole(SELLER_ROLE) {
         productCounter++;
         products[productCounter] = Product(
@@ -64,43 +71,105 @@ contract EcommercePrivacy is Ownable, AccessControl {
             price,
             msg.sender,
             encryptedDetails,
-            iv  // 存储初始向量
+            iv,
+            encryptedKey
         );
-        emit ProductAdded(productCounter, msg.sender, iv);
+        emit ProductAdded(productCounter, msg.sender);
     }
 
-    // 下单函数（仅限买家）
+    // 新增的 verifySignature 函数（独立于placeOrder）
+    function verifySignature(
+        address signer,
+        uint256 productId,
+        bytes32 dataHash,
+        uint256 timestamp,
+        uint256 nonce,
+        bytes memory signature
+    ) external view returns (bool) {
+        if (!hasRole(BUYER_ROLE, signer)) {
+            return false;
+        }
+
+        if (nonces[signer] != nonce) {
+            return false;
+        }
+
+        bytes32 structHash = _hashTypedDataV4(
+            keccak256(
+                abi.encode(
+                    PLACE_ORDER_TYPEHASH,
+                    productId,
+                    dataHash,
+                    timestamp,
+                    nonce
+                )
+            )
+        );
+
+        return structHash.recover(signature) == signer;
+    }
+
     function placeOrder(
         uint256 productId,
         string memory encryptedData,
-        string memory iv  // 加密初始向量参数
-    ) external onlyRole(BUYER_ROLE) {
+        string memory iv,
+        bytes32 dataHash,
+        uint256 timestamp,
+        bytes memory encryptedKey,
+        bytes memory signature
+    ) external {
+        // 1. 基础验证
+        require(products[productId].id != 0, "Invalid product");
+        require(
+            dataHash == keccak256(abi.encodePacked(encryptedData, iv)),
+            "Data hash mismatch"
+        );
+
+        // 2. 使用verifySignature验证签名
+        require(
+            this.verifySignature(
+                msg.sender,
+                productId,
+                dataHash,
+                timestamp,
+                nonces[msg.sender],
+                signature
+            ),
+            "Invalid signature"
+        );
+
+        nonces[msg.sender]++;
+
+        // 3. 创建订单
         orderCounter++;
         orders[orderCounter] = Order(
             orderCounter,
             productId,
             msg.sender,
             block.timestamp,
-            false,  // 初始状态未完成
+            false,
             encryptedData,
-            iv  // 存储初始向量
+            iv,
+            dataHash,
+            encryptedKey
         );
-        emit OrderPlaced(orderCounter, msg.sender, iv);
+
+        emit OrderPlaced(orderCounter, msg.sender, dataHash);
     }
 
-    // 订单完成函数（仅限卖家）
     function fulfillOrder(uint256 orderId) external onlyRole(SELLER_ROLE) {
-        require(orders[orderId].buyer != address(0), "Order not found");
+        require(orders[orderId].id != 0, "Invalid order");
+        require(!orders[orderId].fulfilled, "Already fulfilled");
         orders[orderId].fulfilled = true;
     }
 
-    // 辅助函数：查询商品加密IV
-    function getProductIV(uint256 productId) public view returns (string memory) {
-        return products[productId].iv;
+    function getProductsCount() external view returns (uint256) {
+        return productCounter;
     }
 
-    // 辅助函数：查询订单加密IV
-    function getOrderIV(uint256 orderId) public view returns (string memory) {
-        return orders[orderId].iv;
+    function grantBuyerRole(
+        address user
+    ) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        _grantRole(BUYER_ROLE, user);
     }
 }

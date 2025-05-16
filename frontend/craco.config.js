@@ -1,29 +1,42 @@
 const webpack = require('webpack');
+const path = require('path');
 
 module.exports = {
     webpack: {
         configure: (webpackConfig) => {
-            // Fallback 配置以解决对 process 的引用问题
             webpackConfig.resolve.fallback = {
-                process: require.resolve('process/browser'),
+                ...webpackConfig.resolve.fallback,
+                process: require.resolve('process/browser.js'),
                 crypto: require.resolve('crypto-browserify'),
-                buffer: require.resolve('buffer'),
+                buffer: require.resolve('buffer/'),
                 stream: require.resolve('stream-browserify'),
                 path: require.resolve('path-browserify'),
-                assert: require.resolve('assert'),
-                util: require.resolve('util'),
+                assert: require.resolve('assert/'),
+                util: require.resolve('util/'),
                 vm: require.resolve('vm-browserify'),
+                fs: false,
+                os: false
             };
 
-            // 在所有地方使用 `process` 和 `Buffer` 时，自动提供它们
             webpackConfig.plugins.push(
                 new webpack.ProvidePlugin({
                     process: 'process/browser',
-                    Buffer: ['buffer', 'Buffer'],
+                    Buffer: ['buffer', 'Buffer']
                 })
             );
 
+            webpackConfig.module.rules.push({
+                test: /\.m?js$/,
+                resolve: { fullySpecified: false }
+            });
+
             return webpackConfig;
-        },
+        }
     },
+    devServer: {
+        setupMiddlewares: (middlewares, devServer) => {
+            if (!devServer) throw new Error('webpack-dev-server未定义');
+            return middlewares;
+        }
+    }
 };

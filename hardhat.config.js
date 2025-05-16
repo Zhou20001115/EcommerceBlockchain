@@ -9,14 +9,15 @@ module.exports = {
   solidity: "0.8.28",
   networks: {
     sepolia: {
-      url: process.env.RPC_URL,  // 你的 Infura/Alchemy RPC
+      url: process.env.BLOCKCHAIN_RPC_URL,  // 你的 Infura RPC
       accounts: [process.env.PRIVATE_KEY], // 你的私钥（确保是测试账户）
-      timeout: 60000, // 增加超时时间到 60 秒
+      // timeout: 60000, // 增加超时时间到 60 秒
+      chainId: 11155111
     }
   },
   etherscan: {
     apiKey: {
       sepolia: process.env.ETHERSCAN_API_KEY,  // 确保这里是正确的
     },
-  },  
+  },
 }

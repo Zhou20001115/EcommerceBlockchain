@@ -1,156 +1,155 @@
-// 加载环境变量（.env文件中的配置）
-require("dotenv").config();
-
-// 引入依赖库
 const express = require("express");
 const ethers = require("ethers");
-const bodyParser = require("body-parser");
+const EthCrypto = require("eth-crypto");
 const cors = require("cors");
+const bodyParser = require("body-parser");
+require("dotenv").config();
+const crypto = require('crypto');
 
-// 初始化Express应用
 const app = express();
-
-// 中间件配置
 app.use(bodyParser.json());
-app.use(cors());
+app.use(cors({ origin: "*" }));
+// 实现AES解密方法
+function decryptAES(ciphertext, keyHex, ivHex) {
+  const key = Buffer.from(keyHex, 'hex');
+  const iv = Buffer.from(ivHex, 'hex');
 
-// ------------------------ 区块链连接配置 ------------------------
+  const decipher = crypto.createDecipheriv('aes-256-cbc', key, iv);
+  let decrypted = decipher.update(ciphertext, 'hex', 'utf8');
+  decrypted += decipher.final('utf8');
+  return decrypted;
+}
+// 区块链连接配置
 const provider = new ethers.JsonRpcProvider(process.env.BLOCKCHAIN_RPC_URL);
 const wallet = new ethers.Wallet(process.env.PRIVATE_KEY, provider);
+
+// 合约实例
 const contractABI = require("./EcommercePrivacy.json");
-const contractAddress = process.env.CONTRACT_ADDRESS;
-const contract = new ethers.Contract(contractAddress, contractABI, wallet);
+const contractAddress = process.env.REACT_APP_CONTRACT_ADDRESS;
+const contract = new ethers.Contract(contractAddress, contractABI.abi, wallet);
 
-// ------------------------ 安全验证中间件 ------------------------
-const validateRequest = async (req, res, next) => {
+// 公钥接口
+app.get("/public-key", (req, res) => {
   try {
-    // 1. 基础参数校验
-    const requiredParams = {
-      "/addProduct": ["name", "price", "encryptedDetails", "iv", "encryptedKey", "signature", "publicAddress"],
-      "/placeOrder": ["productId", "encryptedData", "iv", "encryptedKey", "signature", "publicAddress"]
-    }[req.path];
-    
-    if (!requiredParams.every(param => req.body[param])) {
-      return res.status(400).json({ error: "缺少必要参数" });
-    }
-
-    // 2. 签名验证
-    const { signature, publicAddress, ...data } = req.body;
-    const message = JSON.stringify(data);
-    const signer = ethers.verifyMessage(message, signature);
-    
-    if (signer.toLowerCase() !== publicAddress.toLowerCase()) {
-      return res.status(401).json({ error: "签名验证失败" });
-    }
-
-    // 3. 时效性验证（防止重放攻击）
-    if (Date.now() - data.timestamp > process.env.REQUEST_TIMEOUT) {
-      return res.status(408).json({ error: "请求超时" });
-    }
-
-    // 4. 解密会话密钥
-    req.sessionKey = await wallet.decrypt(data.encryptedKey);
-    
-    next();
-  } catch (error) {
-    console.error("安全验证失败:", error);
-    res.status(401).json({ error: "安全验证失败" });
-  }
-};
-
-// ------------------------ 路由定义 ------------------------
-
-// 路由1: 添加商品
-app.post("/addProduct", validateRequest, async (req, res) => {
-  try {
-    const { name, price, encryptedDetails, iv } = req.body;
-
-    // 调用智能合约
-    const tx = await contract.addProduct(
-      name,
-      ethers.parseUnits(price.toString(), "ether"), // 转换价格单位
-      encryptedDetails,
-      iv
-    );
-
-    const receipt = await tx.wait(process.env.CONFIRMATIONS || 2);
-    
+    const publicKey = wallet.signingKey.publicKey;
     res.json({
-      success: true,
-      txHash: tx.hash,
-      blockNumber: receipt.blockNumber,
-      productId: receipt.logs[0].args.productId.toString() // 根据实际合约事件调整
+      publicKey,
+      format: "0x04开头未压缩ECDSA公钥",
     });
-
   } catch (error) {
-    handleBlockchainError(res, error, "添加商品失败");
+    console.error("公钥获取失败:", error);
+    res.status(500).json({ error: "服务器内部错误" });
   }
 });
 
-// 路由2: 下单购买
+// 安全验证中间件
+const validateRequest = async (req, res, next) => {
+  try {
+    const { signature, publicAddress, encryptedKey, ...data } = req.body;
+    const message = JSON.stringify(data);
+
+    const signer = ethers.verifyMessage(message, signature);
+    if (signer.toLowerCase() !== publicAddress.toLowerCase()) {
+      return res.status(401).json({ error: "签名不匹配" });
+    }
+
+    const encryptedObject = EthCrypto.cipher.parse(encryptedKey);
+    const decryptedKeyHex = await EthCrypto.decryptWithPrivateKey(
+      wallet.privateKey,
+      encryptedObject
+    );
+
+    req.sessionKey = decryptedKeyHex;
+    next();
+  } catch (error) {
+    console.error("安全验证失败:", error);
+    res.status(401).json({
+      error: "请求验证失败",
+      details: error.message,
+    });
+  }
+};
+
+// 修改 placeOrder 接口
 app.post("/placeOrder", validateRequest, async (req, res) => {
   try {
     const { productId, encryptedData, iv } = req.body;
 
-    // 数据格式验证
-    if (!isValidHex(iv) || !isValidBase64(encryptedData)) {
-      return res.status(400).json({ error: "无效数据格式" });
-    }
-
-    const tx = await contract.placeOrder(
-      productId,
+    // 解密用户数据（示例）
+    const decryptedData = decryptAES(
       encryptedData,
+      req.sessionKey,
       iv
     );
+    console.log("解密后的用户数据:", decryptedData);
 
-    const receipt = await tx.wait(process.env.CONFIRMATIONS || 2);
-
+    // 返回必要数据（不直接操作合约）
     res.json({
       success: true,
-      txHash: tx.hash,
-      blockNumber: receipt.blockNumber,
-      orderId: receipt.logs[0].args.orderId.toString() // 根据实际合约事件调整
+      decryptedData // 仅示例，实际应处理敏感数据
     });
-
   } catch (error) {
-    handleBlockchainError(res, error, "下单失败");
+    console.error("订单处理失败:", error);
+    res.status(500).json({ error: error.message });
   }
 });
 
-// ------------------------ 工具函数 ------------------------
-const isValidHex = (str) => /^0x[0-9a-fA-F]+$/.test(str);
-const isValidBase64 = (str) => /^[A-Za-z0-9+/=]+$/.test(str);
+// 新增商品详情解密接口
+app.post("/decryptProduct", async (req, res) => {
+  try {
+    const { productId, encryptedKey } = req.body;
 
-const handleBlockchainError = (res, error, context) => {
-  const errorInfo = {
-    message: error.reason || error.message,
-    code: error.code,
-    stack: process.env.NODE_ENV === "development" ? error.stack : undefined
-  };
+    // 解密会话密钥
+    const encryptedObject = EthCrypto.cipher.parse(encryptedKey);
+    const sessionKey = await EthCrypto.decryptWithPrivateKey(
+      process.env.PRIVATE_KEY,
+      encryptedObject
+    );
+    if (!sessionKey.match(/^0x[0-9a-fA-F]{64}$/)) {
+      throw new Error("Invalid session key format");
+    }
 
-  console.error(`${context}:`, errorInfo);
+    // 获取商品数据
+    const product = await contract.products(productId);
+    const details = decryptAES(product.encryptedDetails, sessionKey.replace(/^0x/, ''), product.iv);
 
-  res.status(500).json({
-    error: `${context}: ${errorInfo.message}`,
-    ...(process.env.NODE_ENV === "development" && { details: errorInfo })
-  });
-};
+    res.json({ details });
+  } catch (error) {
+    res.status(500).json({ error: "解密失败" });
+  }
+});
 
-// ------------------------ 服务器启动 ------------------------
+// 获取商品列表（合约读取）
+app.get("/products", async (req, res) => {
+  try {
+    let items = [];
+    for (let i = 1; i <= 100; i++) {
+      try {
+        const p = await contract.products(i);
+        if (p.name) items.push(p);
+      } catch (_) {
+        break;
+      }
+    }
+    res.json(items);
+  } catch (error) {
+    console.error("获取商品失败:", error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 启动服务
 const PORT = process.env.PORT || 5000;
+app.listen(PORT, async () => {
+  console.log(`✅ 服务运行中: http://localhost:${PORT}`);
+  console.log(`🔗 合约地址: ${contractAddress}`);
+  console.log(`🌐 RPC 地址: ${process.env.BLOCKCHAIN_RPC_URL}`);
+  console.log(`🔑 服务账户地址: ${wallet.address}`);
 
-app.listen(PORT, () => {
-  console.log(`
-  ███████╗███████╗██████╗ ██╗   ██╗███████╗██████╗ 
-  ██╔════╝██╔════╝██╔══██╗██║   ██║██╔════╝██╔══██╗
-  █████╗  █████╗  ██████╔╝██║   ██║█████╗  ██████╔╝
-  ██╔══╝  ██╔══╝  ██╔══██╗╚██╗ ██╔╝██╔══╝  ██╔══██╗
-  ██║     ███████╗██║  ██║ ╚████╔╝ ███████╗██║  ██║
-  ╚═╝     ╚══════╝╚═╝  ╚═╝  ╚═══╝  ╚══════╝╚═╝  ╚═╝
-  `);
-  console.log(`服务运行中 ➤ 端口: ${PORT}`);
-  console.log(`区块链网络: ${process.env.BLOCKCHAIN_RPC_URL}`);
-  console.log(`合约地址: ${contractAddress}`);
-  console.log(`节点版本: ${process.version}`);
-  console.log(`运行模式: ${process.env.NODE_ENV || "development"}`);
+  try {
+    const balance = await provider.getBalance(wallet.address);
+    console.log(`💰 当前账户余额: ${ethers.formatEther(balance)} ETH`);
+  } catch (err) {
+    console.error("💥 获取余额失败:", err.message);
+  }
 });

@@ -5,10 +5,10 @@ import { ethers } from 'ethers';
 import { NETWORKS } from '../config/networks';
 
 // 定义钱包连接组件
-export default function ConnectWallet() {
+export default function ConnectWallet({ setAccount: externalSetAccount }) {
   // 从Web3上下文中获取provider（区块链连接）、signer（签名者）、network（当前网络）
   const { provider, signer, network } = useWeb3();
-  
+
   // 组件状态管理：账户地址、余额、加载状态
   const [account, setAccount] = useState('');
   const [balance, setBalance] = useState('');
@@ -22,7 +22,7 @@ export default function ConnectWallet() {
           // 获取当前账户地址
           const address = await signer.getAddress();
           setAccount(address);
-          
+          externalSetAccount?.(address);  // ✅ 同步 App 状态
           // 查询账户余额并转换为ETH单位
           const balance = await provider.getBalance(address);
           setBalance(ethers.formatEther(balance)); // 使用ethers工具转换Wei为ETH
@@ -50,10 +50,10 @@ export default function ConnectWallet() {
 
       // 检查provider是否初始化
       if (!provider) throw new Error('区块链提供者未初始化');
-      
+
       // 获取当前网络信息
       const currentNetwork = await provider.getNetwork();
-      
+
       // 验证网络是否支持
       if (!NETWORKS[currentNetwork.chainId]) {
         const supportedNetworks = Object.values(NETWORKS).map(n => n.name).join('/');
@@ -72,8 +72,8 @@ export default function ConnectWallet() {
     <div className="wallet-card">
       {/* 未连接时显示连接按钮 */}
       {!account ? (
-        <button 
-          onClick={handleConnect} 
+        <button
+          onClick={handleConnect}
           disabled={loading} // 加载时禁用按钮
         >
           {loading ? '连接中...' : '连接钱包'}
@@ -82,11 +82,11 @@ export default function ConnectWallet() {
         // 已连接时显示账户信息
         <div className="wallet-info">
           {/* 显示账户地址（前6位+后4位） */}
-          <p>账户: {account.slice(0,6)}...{account.slice(-4)}</p>
-          
+          <p>账户: {account.slice(0, 6)}...{account.slice(-4)}</p>
+
           {/* 显示余额（保留4位小数）和代币符号 */}
           <p>余额: {Number(balance).toFixed(4)} {NETWORKS[network?.chainId]?.symbol}</p>
-          
+
           {/* 显示网络名称，若未识别则显示"未知网络" */}
           <p>网络: {NETWORKS[network?.chainId]?.name || '未知网络'}</p>
         </div>
